@@ -230,6 +230,59 @@ def annualize_beta(stock, benchmark="^GSPC"):
     var = joined["market"].var()
     return float(joined["stock"].cov(joined["market"]) / var) if var else np.nan
 
+PEER_NAMES = {"MRK": "Merck & Co.", "PFE": "Pfizer", "ABBV": "AbbVie", "BMY": "Bristol-Myers Squibb"}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fundamentals_fallback(symbol, price, market_cap):
+    """Compute P/E and P/S from quarterly statements when Yahoo 'info' is empty.
+    Raises if nothing could be computed, so a failed lookup is never cached."""
+    t = yf.Ticker(symbol)
+    out = {"trailing_pe": np.nan, "price_to_sales": np.nan, "forward_pe": np.nan}
+
+    def ttm(df, names):
+        try:
+            if df is None or df.empty:
+                return np.nan
+            for n in names:
+                if n in df.index:
+                    vals = pd.to_numeric(df.loc[n].iloc[:4], errors="coerce").dropna()
+                    if len(vals) == 4:
+                        return float(vals.sum())
+        except Exception:
+            pass
+        return np.nan
+
+    try:
+        q = t.quarterly_income_stmt
+    except Exception:
+        q = None
+
+    eps = ttm(q, ["Diluted EPS", "Basic EPS"])
+    if pd.notna(price) and pd.notna(eps) and eps > 0:
+        out["trailing_pe"] = price / eps
+
+    rev = ttm(q, ["Total Revenue", "Operating Revenue"])
+    if pd.notna(market_cap) and pd.notna(rev) and rev > 0:
+        out["price_to_sales"] = market_cap / rev
+
+    try:
+        feps = float(t.earnings_estimate.loc["+1y", "avg"])
+        if pd.notna(price) and feps > 0:
+            out["forward_pe"] = price / feps
+    except Exception:
+        pass
+
+    if all(pd.isna(v) for v in out.values()):
+        raise RuntimeError(f"No fundamentals found for {symbol}")
+    return out
+
+
+def fundamentals_fallback(symbol, price, market_cap):
+    try:
+        return _fundamentals_fallback(symbol, price, market_cap)
+    except Exception:
+        return {"trailing_pe": np.nan, "price_to_sales": np.nan, "forward_pe": np.nan}
 
 # ----------------------------- FRED -----------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
