@@ -715,27 +715,47 @@ with tabs[5]:
         s, err = yahoo_snapshot(sym)
         if err:
             peer_errors.append(err)
+        fb = fundamentals_fallback(sym, s.get("last_price", np.nan), s.get("market_cap", np.nan))
+
+        def pick(key):
+            v = s.get(key, np.nan)
+            return v if pd.notna(v) else fb[key]
+
+        beta_val = s.get("beta", np.nan)
+        if pd.isna(beta_val):
+            beta_val = annualize_beta(sym)   # 5y regression vs S&P 500
+
+        mcap = s.get("market_cap", np.nan)
         peer_rows.append({
             "Ticker": sym,
-            "Company": s.get("short_name", sym),
-            "Market cap ($bn)": s["market_cap"] / 1e9 if pd.notna(s.get("market_cap", np.nan)) else np.nan,
-            "Trailing P/E": s.get("trailing_pe", np.nan),
-            "Forward P/E": s.get("forward_pe", np.nan),
-            "Price / Sales": s.get("price_to_sales", np.nan),
+            "Company": s.get("short_name") if s.get("short_name") not in (None, sym) else PEER_NAMES.get(sym, sym),
+            "Market cap ($bn)": mcap / 1e9 if pd.notna(mcap) else np.nan,
+            "Trailing P/E": pick("trailing_pe"),
+            "Forward P/E": pick("forward_pe"),
+            "Price / Sales": pick("price_to_sales"),
             "Dividend yield (%)": s.get("dividend_yield_pct", np.nan),
-            "Beta": s.get("beta", np.nan),
+            "Beta": beta_val,
         })
+
     peer_df = pd.DataFrame(peer_rows)
-    st.dataframe(peer_df.style.format({
-        "Market cap ($bn)": "${:,.1f}", "Trailing P/E": "{:.1f}x", "Forward P/E": "{:.1f}x",
-        "Price / Sales": "{:.1f}x", "Dividend yield (%)": "{:.2f}%", "Beta": "{:.2f}"
-    }, na_rep="—"), use_container_width=True)
+    num_cols = [c for c in peer_df.columns if c not in ("Ticker", "Company")]
+    peer_df[num_cols] = peer_df[num_cols].apply(pd.to_numeric, errors="coerce")
+
+    # Turn every cell into text so no "None"/"nan" can ever appear
+    formats = {"Market cap ($bn)": "${:,.1f}", "Trailing P/E": "{:.1f}x", "Forward P/E": "{:.1f}x",
+               "Price / Sales": "{:.1f}x", "Dividend yield (%)": "{:.2f}%", "Beta": "{:.2f}"}
+    shown = peer_df.copy()
+    for col, f in formats.items():
+        shown[col] = peer_df[col].apply(lambda v, f=f: "—" if pd.isna(v) else f.format(v))
+    st.dataframe(shown, use_container_width=True, hide_index=True)
+
     if peer_errors:
         st.warning("Some peer data could not be loaded: " + "; ".join(peer_errors))
-    st.caption("Peer data are provider-supplied snapshots and may be missing or calculated on different bases. Confirm comparability before drawing conclusions.")
+    st.caption("Peer data are provider-supplied snapshots and may be missing or calculated on different bases. "
+               "'—' means the value could not be retrieved or is not meaningful (e.g. negative earnings). "
+               "Confirm comparability before drawing conclusions.")
     st.download_button("Download peer comparison CSV", peer_df.to_csv(index=False).encode(),
                        "mrk_peer_comparison.csv", "text/csv")
-
 # ----------------------------- Methodology -----------------------------
 with tabs[6]:
     st.subheader("Methodology, assumptions & limitations")
