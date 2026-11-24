@@ -266,12 +266,32 @@ def _fundamentals_fallback(symbol, price, market_cap):
     if pd.notna(market_cap) and pd.notna(rev) and rev > 0:
         out["price_to_sales"] = market_cap / rev
 
-    try:
-        feps = float(t.earnings_estimate.loc["+1y", "avg"])
-        if pd.notna(price) and feps > 0:
-            out["forward_pe"] = price / feps
-    except Exception:
-        pass
+        # Forward EPS: try several Yahoo sources, in order
+    feps = np.nan
+
+    def _from_table(getter, col):
+        try:
+            tbl = getter()
+            if tbl is not None and "+1y" in tbl.index:
+                v = pd.to_numeric(tbl.loc["+1y", col], errors="coerce")
+                if pd.notna(v) and v > 0:
+                    return float(v)
+        except Exception:
+            pass
+        return np.nan
+
+    feps = _from_table(lambda: t.earnings_estimate, "avg")
+    if pd.isna(feps):
+        feps = _from_table(lambda: t.eps_trend, "current")
+    if pd.isna(feps):
+        try:
+            v = pd.to_numeric(t.get_info().get("forwardEps"), errors="coerce")
+            feps = float(v) if pd.notna(v) and v > 0 else np.nan
+        except Exception:
+            pass
+
+    if pd.notna(price) and pd.notna(feps) and feps > 0:
+        out["forward_pe"] = price / feps
 
     if all(pd.isna(v) for v in out.values()):
         raise RuntimeError(f"No fundamentals found for {symbol}")
