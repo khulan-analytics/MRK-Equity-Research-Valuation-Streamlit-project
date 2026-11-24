@@ -47,7 +47,7 @@ Merck's largest product, **Keytruda**, accounts for a large share of company rev
 
 | Overview | Patent Cliff Scenarios |
 |:---:|:---:|
-| ![Overview](docs/overview.png) | ![Patent Cliff](docs/patent_cliff.png) |
+| ![Overview](docs/overview.png) | ![Patent Cliff](patent_cliff.png) |
 
 | DCF Valuation | Peer Comparison |
 |:---:|:---:|
