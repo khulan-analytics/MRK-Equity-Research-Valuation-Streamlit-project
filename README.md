@@ -201,7 +201,7 @@ Good analysts state what their model *can't* do.
 ## 👤 Author
 
 Khulan Ganzorig
-[LinkedIn](https://linkedin.com/in/your-profile) · [GitHub](https://github.com/your-username) · your.email@example.com
+
 
 *If this project was useful or interesting, a ⭐ helps others find it.*
 
