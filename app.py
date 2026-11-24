@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -56,7 +56,7 @@ with st.sidebar:
     st.caption("Patent timing and biosimilar entry are uncertain. Treat the erosion rate and start year as scenarios, not facts.")
 
 
-# ----------------------------- Helpers -----------------------------
+# ----------------------------- Generic helpers -----------------------------
 def _num(x):
     """Convert to float or NaN."""
     try:
@@ -74,6 +74,42 @@ def _first_valid(*vals):
     return np.nan
 
 
+def fmt_bn(x):
+    return "—" if pd.isna(x) else f"${x:,.2f}B"
+
+
+def safe_latest(series, default=np.nan):
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    return float(s.iloc[-1]) if len(s) else default
+
+
+def latest_row(df, cols):
+    """Latest fiscal year where ALL requested columns have data (keeps years consistent)."""
+    cols = [c for c in cols if c in df.columns]
+    if df.empty or not cols:
+        return None
+    sub = df.dropna(subset=cols)
+    return sub.iloc[-1] if not sub.empty else None
+
+
+def show_df(df, fmt="{:,.2f}"):
+    """Display a dataframe with missing values shown as an em dash."""
+    if df is None or df.empty:
+        st.info("No data available.")
+        return
+
+    def _fmt(v):
+        if pd.isna(v):
+            return "—"
+        try:
+            return fmt.format(v)
+        except (ValueError, TypeError):
+            return str(v)
+
+    st.dataframe(df.style.format(_fmt), use_container_width=True)
+
+
+# ----------------------------- Yahoo Finance -----------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def yahoo_history(symbol, period="5y"):
     # Raises on failure -> failures are NOT cached.
@@ -97,13 +133,11 @@ def _yahoo_snapshot_cached(symbol):
     """
     t = yf.Ticker(symbol)
 
-    # 1) Full info (scraped endpoint; often rate-limited or empty)
     try:
         info = t.get_info() or {}
     except Exception:
         info = {}
 
-    # 2) fast_info (lighter endpoint)
     def fi(key):
         try:
             return _num(t.fast_info[key])
@@ -115,7 +149,7 @@ def _yahoo_snapshot_cached(symbol):
     market_cap = _first_valid(info.get("marketCap"), fi("market_cap"),
                               last_price * shares if pd.notna(last_price) and pd.notna(shares) else np.nan)
 
-    # 3) Dividend yield from trailing-12-month dividends (avoids unit ambiguity of 'dividendYield')
+    # Dividend yield from trailing-12-month dividends (avoids unit ambiguity of 'dividendYield')
     div_yield_pct = np.nan
     try:
         divs = t.dividends
@@ -135,7 +169,7 @@ def _yahoo_snapshot_cached(symbol):
             # Newer yfinance returns percent already (e.g. 3.2); older returned a fraction (0.032).
             div_yield_pct = dy if dy >= 0.2 else dy * 100
 
-    # 4) Debt and cash from balance sheet if missing in info
+    # Debt and cash from balance sheet if missing in info
     total_debt = _num(info.get("totalDebt"))
     total_cash = _num(info.get("totalCash"))
     if pd.isna(total_debt) or pd.isna(total_cash):
@@ -179,14 +213,25 @@ def yahoo_snapshot(symbol):
         return {}, f"{symbol}: {e}"
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def sec_companyfacts(cik):
-    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik.zfill(10)}.json"
-    r = requests.get(url, headers=SEC_HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json()
+def annualize_beta(stock, benchmark="^GSPC"):
+    try:
+        a = yahoo_history(stock, "5y")["Close"].pct_change().dropna()
+        b = yahoo_history(benchmark, "5y")["Close"].pct_change().dropna()
+    except Exception:
+        return np.nan
+    for s in (a, b):
+        idx = pd.DatetimeIndex(s.index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        s.index = idx.normalize()
+    joined = pd.concat([a.rename("stock"), b.rename("market")], axis=1).dropna()
+    if len(joined) < 30:
+        return np.nan
+    var = joined["market"].var()
+    return float(joined["stock"].cov(joined["market"]) / var) if var else np.nan
 
 
+# ----------------------------- FRED -----------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def fred_series(series_id, api_key):
     if not api_key:
@@ -204,6 +249,45 @@ def fred_series(series_id, api_key):
     return df.dropna(subset=["value"]).set_index("date")[["value"]]
 
 
+# ----------------------------- SEC EDGAR -----------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def sec_companyfacts(cik):
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik.zfill(10)}.json"
+    r = requests.get(url, headers=SEC_HEADERS, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def sec_fact_series(companyfacts, tag_candidates, unit_preference=None):
+    """Extract annual SEC XBRL observations for a tag; prefer 10-K FY observations."""
+    facts = companyfacts.get("facts", {}).get("us-gaap", {})
+    tag = next((t for t in tag_candidates if t in facts), None)
+    if not tag:
+        return pd.Series(dtype=float, name=(tag_candidates[0] if tag_candidates else ""))
+    units = facts[tag].get("units", {})
+    unit = unit_preference if unit_preference in units else (
+        "USD" if "USD" in units else next(iter(units), None)
+    )
+    if unit is None:
+        return pd.Series(dtype=float, name=tag)
+    rows = []
+    for x in units[unit]:
+        if x.get("form") != "10-K" or x.get("fp") != "FY" or not x.get("end"):
+            continue
+        if "start" in x:  # duration facts: keep ~annual periods only
+            days = (pd.to_datetime(x["end"]) - pd.to_datetime(x["start"])).days
+            if not 300 <= days <= 400:
+                continue
+        rows.append({"date": pd.to_datetime(x["end"]), "value": float(x["val"]),
+                     "filed": x.get("filed", ""), "fy": x.get("fy")})
+    if not rows:
+        return pd.Series(dtype=float, name=tag)
+    df = pd.DataFrame(rows).sort_values(["date", "filed"]).drop_duplicates("date", keep="last")
+    s = df.set_index("date")["value"].sort_index()
+    s.name = tag
+    return s
+
+
 def sec_fact_series_multi(companyfacts, tag_candidates):
     """Combine ALL candidate tags. Earlier tags take priority; later tags fill gaps."""
     combined = pd.Series(dtype=float, index=pd.DatetimeIndex([]))
@@ -215,15 +299,18 @@ def sec_fact_series_multi(companyfacts, tag_candidates):
 
 
 def clean_sec(df, core=("Revenue", "Net income")):
-    """Drop empty years/columns. Never fabricate values."""
+    """Drop empty years/columns. Never fabricates values."""
     df = df.copy()
     df.index = pd.to_datetime(df.index)
-    df = df.dropna(how="all")                                   # fully empty years (e.g. 2006)
+    df = df.dropna(how="all")                  # fully empty years
+    df = df.dropna(axis=1, how="all")          # metrics with no data at all
     core = [c for c in core if c in df.columns]
     if core:
-        df = df.dropna(subset=core, how="any")                  # keep years with core data
-    df = df.dropna(axis=1, how="all")                           # metrics with no data at all
+        strict = df.dropna(subset=core, how="all")   # keep a year if ANY core metric exists
+        if not strict.empty:
+            df = strict
     return df
+
 
 def get_sec_financials():
     cf = sec_companyfacts(SEC_CIK)
@@ -243,7 +330,7 @@ def get_sec_financials():
         "Total assets": ["Assets"],
         "Long-term debt": ["LongTermDebtNoncurrent", "LongTermDebt"],
         "Cash": ["CashAndCashEquivalentsAtCarryingValue"],
-        # helper rows used only to derive EBIT; dropped below
+        # Helper rows used only to derive an EBIT proxy; dropped below
         "Pretax income": ["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
                           "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"],
         "Interest expense": ["InterestExpense", "InterestExpenseDebt", "InterestExpenseNonoperating"],
@@ -251,7 +338,7 @@ def get_sec_financials():
     out = {label: sec_fact_series_multi(cf, tags) for label, tags in definitions.items()}
     df = pd.concat(out, axis=1).sort_index()
 
-    # Merck doesn't report operating income, so use an EBIT proxy where it is missing.
+    # Merck doesn't report an operating income line, so use an EBIT proxy (pre-tax income + interest).
     ebit_proxy = df["Pretax income"] + df["Interest expense"].fillna(0)
     df["Operating income"] = df["Operating income"].fillna(ebit_proxy)
     df = df.drop(columns=["Pretax income", "Interest expense"])
@@ -259,44 +346,7 @@ def get_sec_financials():
     return clean_sec(df)
 
 
-def fmt_bn(x):
-    return "—" if pd.isna(x) else f"${x:,.2f}B"
-
-
-def safe_latest(series, default=np.nan):
-    s = pd.to_numeric(series, errors="coerce").dropna()
-    return float(s.iloc[-1]) if len(s) else default
-
-
-def show_df(df, fmt="{:,.2f}"):
-    """Display a dataframe with missing values shown as an em dash."""
-    if df is None or df.empty:
-        st.info("No data available.")
-        return
-    st.dataframe(df.style.format(fmt, na_rep="—"), use_container_width=True)
-
-
-def annualize_beta(stock, benchmark="^GSPC"):
-    ...
-
-
-def annualize_beta(stock, benchmark="^GSPC"):
-    try:
-        a = yahoo_history(stock, "5y")["Close"].pct_change().dropna()
-        b = yahoo_history(benchmark, "5y")["Close"].pct_change().dropna()
-    except Exception:
-        return np.nan
-    a.index = pd.DatetimeIndex(a.index).tz_localize(None) if pd.DatetimeIndex(a.index).tz is not None else a.index
-    b.index = pd.DatetimeIndex(b.index).tz_localize(None) if pd.DatetimeIndex(b.index).tz is not None else b.index
-    a.index = a.index.normalize()
-    b.index = b.index.normalize()
-    joined = pd.concat([a.rename("stock"), b.rename("market")], axis=1).dropna()
-    if len(joined) < 30:
-        return np.nan
-    var = joined["market"].var()
-    return float(joined["stock"].cov(joined["market"]) / var) if var else np.nan
-
-
+# ----------------------------- Scenario model -----------------------------
 def build_patent_scenarios(latest_total_revenue, latest_keytruda, years, non_key_growth,
                            pre_growth, post_erosion, cliff_year):
     rows = []
@@ -357,6 +407,7 @@ if not prices.empty:
         idx = idx.tz_localize(None)
     prices.index = idx
     prices.index.name = "Date"
+    prices = prices.dropna(subset=["Close"])
     prices["Daily return"] = prices["Close"].pct_change()
     prices["Cumulative return"] = (1 + prices["Daily return"].fillna(0)).cumprod() - 1
 
@@ -371,6 +422,10 @@ beta_label = "Beta (Yahoo)"
 if pd.isna(beta_display) and pd.notna(beta_regression):
     beta_display, beta_label = beta_regression, "Beta (5y vs S&P 500)"
 div_yield_pct = snap.get("dividend_yield_pct", np.nan)
+
+# Latest SEC fiscal year with revenue (used by the patent-cliff tab)
+rev_row = latest_row(sec_df, ["Revenue"]) if not sec_df.empty else None
+latest_revenue_bn = rev_row["Revenue"] / 1e9 if rev_row is not None else np.nan
 
 # ----------------------------- Overview -----------------------------
 with tabs[0]:
@@ -427,25 +482,34 @@ with tabs[2]:
     st.subheader("SEC-reported annual financial data")
     if not sec_df.empty:
         display = sec_df.copy() / 1e9
-        st.dataframe(display.style.format("{:,.2f}"), use_container_width=True)
-        st.caption("USD billions. SEC companyfacts tags and available fiscal-year observations can differ by company and filing. Verify all figures against the original 10-K.")
+
         chosen = [c for c in ["Revenue", "Operating income", "Net income", "Operating cash flow", "R&D expense"]
                   if c in display and display[c].notna().any()]
+
+        table = display.copy()
+        table.index = table.index.year
+        table.index.name = "Fiscal year"
+        show_df(table)
+        st.caption("USD billions. 'Operating income' is an EBIT proxy (pre-tax income + interest expense) where Merck "
+                   "does not report it directly. '—' means no value was reported under the tags used. "
+                   "Verify all figures against the original 10-K.")
+
         if chosen:
             chart_df = display[chosen].reset_index(names="Fiscal year end").melt(
-                "Fiscal year end", var_name="Metric", value_name="USD billions")
+                "Fiscal year end", var_name="Metric", value_name="USD billions").dropna()
             st.plotly_chart(px.line(chart_df, x="Fiscal year end", y="USD billions", color="Metric",
                                     markers=True, title="Historical financial performance"),
                             use_container_width=True)
         st.download_button("Download SEC financial data CSV", sec_df.to_csv().encode(), "mrk_sec_financials.csv", "text/csv")
     else:
         st.warning("SEC companyfacts data could not be loaded. Check the SEC request or use the company's filings directly.")
+
     with st.expander("Yahoo Finance statement cross-check"):
         try:
             statements = yahoo_statements(TICKER)
             for key, label in [("income", "Income statement"), ("balance", "Balance sheet"), ("cashflow", "Cash flow")]:
                 st.markdown(f"**{label}**")
-                st.dataframe(statements[key], use_container_width=True)
+                show_df(statements[key].dropna(how="all"), "{:,.0f}")
         except Exception as e:
             st.warning(f"Yahoo statements unavailable: {e}")
 
@@ -456,15 +520,15 @@ with tabs[3]:
         "This module separates Keytruda from the rest of Merck's revenue, then applies explicit scenario assumptions. "
         "The starting Keytruda revenue is a user-editable input: verify it against Merck's latest annual report."
     )
-    latest_revenue_bn = safe_latest(sec_df.get("Revenue", pd.Series(dtype=float))) / 1e9
-    if not np.isfinite(latest_revenue_bn) or latest_revenue_bn <= 0:
-        latest_revenue_bn = 60.0
+    pc_revenue_bn = latest_revenue_bn
+    if not np.isfinite(pc_revenue_bn) or pc_revenue_bn <= 0:
+        pc_revenue_bn = 60.0
         st.warning("SEC revenue could not be read; using an illustrative total-revenue starting value of $60B. Replace it with the latest reported value.")
-    st.metric("Latest SEC annual revenue (if available)", fmt_bn(latest_revenue_bn))
-    if keytruda_revenue >= latest_revenue_bn:
+    st.metric("Latest SEC annual revenue (if available)", fmt_bn(pc_revenue_bn))
+    if keytruda_revenue >= pc_revenue_bn:
         st.warning("Keytruda revenue input is greater than or equal to total company revenue. Check the reporting year and units.")
     scenarios = build_patent_scenarios(
-        latest_revenue_bn, keytruda_revenue, forecast_years,
+        pc_revenue_bn, keytruda_revenue, forecast_years,
         non_keytruda_growth / 100, pre_cliff_growth / 100,
         erosion / 100, int(cliff_start_year)
     )
@@ -477,7 +541,7 @@ with tabs[3]:
     fig2.update_layout(yaxis_title="Revenue ($bn)")
     st.plotly_chart(fig2, use_container_width=True)
     st.dataframe(scenarios.pivot(index="Year", columns="Scenario", values="Total revenue")
-                 .style.format("${:,.1f}B"), use_container_width=True)
+                 .style.format("${:,.1f}B", na_rep="—"), use_container_width=True)
     st.download_button("Download patent-cliff scenarios CSV", scenarios.to_csv(index=False).encode(),
                        "mrk_patent_scenarios.csv", "text/csv")
     st.caption("This is a simplified scenario model, not a company forecast. It does not model product-level launches, geographic patent differences, litigation outcomes, or volume/price dynamics.")
@@ -486,12 +550,20 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("Discounted cash flow valuation")
     st.markdown("The DCF is an illustrative FCFF model. Review and replace assumptions with your own researched estimates.")
-    rev_bn = safe_latest(sec_df.get("Revenue", pd.Series(dtype=float))) / 1e9
+
+    # Revenue and EBIT must come from the SAME fiscal year
+    row = latest_row(sec_df, ["Revenue", "Operating income"]) if not sec_df.empty else None
+    if row is not None:
+        rev_bn = row["Revenue"] / 1e9
+        op_income_bn = row["Operating income"] / 1e9
+    else:
+        rev_bn = latest_revenue_bn
+        op_income_bn = np.nan
     if not np.isfinite(rev_bn) or rev_bn <= 0:
         rev_bn = 60.0
-    op_income_bn = safe_latest(sec_df.get("Operating income", pd.Series(dtype=float))) / 1e9
     op_margin_default = (max(0.05, min(0.50, op_income_bn / rev_bn))
-                         if np.isfinite(op_income_bn) and rev_bn else 0.25)
+                         if np.isfinite(op_income_bn) else 0.25)
+
     c1, c2, c3 = st.columns(3)
     with c1:
         starting_revenue = st.number_input("Starting revenue ($bn)", min_value=1.0, value=float(round(rev_bn, 2)), step=1.0)
@@ -503,6 +575,7 @@ with tabs[4]:
     with c3:
         nwc_pct = st.number_input("Change in NWC / revenue (%)", min_value=-10.0, max_value=20.0, value=1.0, step=0.5)
         dcf_scenario = st.selectbox("Patent-cliff scenario linked to DCF", ["Base", "Bull", "Bear"])
+
     dcf_scenarios = build_patent_scenarios(
         starting_revenue, keytruda_revenue, forecast_years,
         non_keytruda_growth / 100, pre_cliff_growth / 100,
@@ -573,7 +646,9 @@ with tabs[4]:
         c.metric("Equity value", fmt_bn(eq_val))
         d.metric("Implied value / share", f"${price_per_share:,.2f}" if pd.notna(price_per_share) else "Shares unavailable")
         money_cols = ["Revenue", "EBIT", "NOPAT", "D&A", "CapEx", "Change in NWC", "FCFF", "PV of FCFF"]
-        st.dataframe(forecast.style.format({col: "${:,.2f}B" for col in money_cols}), use_container_width=True)
+        fmt_map = {col: "${:,.2f}B" for col in money_cols}
+        fmt_map["Discount factor"] = "{:.4f}"
+        st.dataframe(forecast.style.format(fmt_map, na_rep="—"), use_container_width=True)
         st.plotly_chart(px.bar(forecast, x="Year", y="FCFF", title="Forecast free cash flow to firm"), use_container_width=True)
         st.write(f"Terminal value: **{fmt_bn(terminal_value)}** · Present value of terminal value: **{fmt_bn(pv_terminal)}**")
         st.caption("The DCF revenue forecast is linked to the selected patent-cliff scenario. EBIT margin, D&A, CapEx, and working-capital assumptions remain simplified and should be researched and refined.")
@@ -613,7 +688,7 @@ with tabs[6]:
     st.subheader("Methodology, assumptions & limitations")
     st.markdown("""
 **Data hierarchy**
-1. SEC EDGAR 10-K/10-Q filings for reported financial statements.
+1. SEC EDGAR 10-K/10-Q filings for reported financial statements (all candidate XBRL tags are combined; earlier tags take priority and later tags fill gaps).
 2. Merck annual reports and earnings releases for product-level sales and management guidance.
 3. Yahoo Finance for market prices, dividends, market capitalization, and peer snapshots (with fallbacks: fast_info, balance sheet, dividend history, regression beta).
 4. FRED for Treasury yields, rates, and macroeconomic series.
@@ -626,6 +701,11 @@ with tabs[6]:
 - FCFF: `EBIT × (1-tax) + D&A - CapEx - change in NWC`
 - Terminal value: `FCFF(n+1) / (WACC - terminal growth)`
 - Equity value: `Enterprise value - debt + cash`
+- EBIT proxy (when operating income is not reported): `Pre-tax income + interest expense`
+
+**Data handling**
+- Missing values are never filled with zeros, forward-fills or interpolation. Gaps display as "—".
+- Revenue and EBIT margin in the DCF come from the same fiscal year.
 
 **Important limitations**
 - Patent expiration and biosimilar launch dates are legal and commercial uncertainties; verify the specific patents, geographies, and litigation status from primary sources.
