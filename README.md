@@ -40,10 +40,6 @@ Merck's largest product, **Keytruda**, accounts for a large share of company rev
 | 📥 | **Exportable** | Every table downloads as CSV |
 
 ---
-
-## 📸 Screenshots
-
-
 ## 📸 Screenshots
 
 <table>
