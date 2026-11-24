@@ -731,15 +731,31 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Pharmaceutical peer comparison")
     peer_rows, peer_errors = [], []
+
+    with st.expander("Forward EPS estimates (optional: enter next-year consensus EPS)"):
+        _syms = [TICKER] + PEERS
+        _cols = st.columns(len(_syms))
+        manual_eps = {}
+        for _c, _sym in zip(_cols, _syms):
+            manual_eps[_sym] = _c.number_input(f"{_sym} EPS ($)", min_value=0.0, value=0.0,
+                                               step=0.1, key=f"feps_{_sym}")
+
     for sym in [TICKER] + PEERS:
         s, err = yahoo_snapshot(sym)
         if err:
             peer_errors.append(err)
         fb = fundamentals_fallback(sym, s.get("last_price", np.nan), s.get("market_cap", np.nan))
 
-        def pick(key):
+        def pick(key, s=s, fb=fb):
             v = s.get(key, np.nan)
             return v if pd.notna(v) else fb[key]
+
+        # Forward P/E: user-entered EPS overrides the automatic value
+        fwd_pe = pick("forward_pe")
+        eps_in = manual_eps.get(sym, 0.0)
+        px_now = s.get("last_price", np.nan)
+        if eps_in > 0 and pd.notna(px_now):
+            fwd_pe = px_now / eps_in
 
         beta_val = s.get("beta", np.nan)
         if pd.isna(beta_val):
@@ -751,7 +767,7 @@ with tabs[5]:
             "Company": s.get("short_name") if s.get("short_name") not in (None, sym) else PEER_NAMES.get(sym, sym),
             "Market cap ($bn)": mcap / 1e9 if pd.notna(mcap) else np.nan,
             "Trailing P/E": pick("trailing_pe"),
-            "Forward P/E": pick("forward_pe"),
+            "Forward P/E": fwd_pe,
             "Price / Sales": pick("price_to_sales"),
             "Dividend yield (%)": s.get("dividend_yield_pct", np.nan),
             "Beta": beta_val,
@@ -772,6 +788,7 @@ with tabs[5]:
     if peer_errors:
         st.warning("Some peer data could not be loaded: " + "; ".join(peer_errors))
     st.caption("Peer data are provider-supplied snapshots and may be missing or calculated on different bases. "
+               "Forward P/E uses automatic estimates where available, or the EPS you entered above. "
                "'—' means the value could not be retrieved or is not meaningful (e.g. negative earnings). "
                "Confirm comparability before drawing conclusions.")
     st.download_button("Download peer comparison CSV", peer_df.to_csv(index=False).encode(),
