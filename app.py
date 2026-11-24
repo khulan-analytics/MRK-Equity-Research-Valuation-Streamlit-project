@@ -204,53 +204,59 @@ def fred_series(series_id, api_key):
     return df.dropna(subset=["value"]).set_index("date")[["value"]]
 
 
-def sec_fact_series(companyfacts, tag_candidates, unit_preference=None):
-    """Extract annual SEC XBRL observations for a tag; prefer 10-K FY observations."""
-    facts = companyfacts.get("facts", {}).get("us-gaap", {})
-    tag = next((t for t in tag_candidates if t in facts), None)
-    if not tag:
-        return pd.Series(dtype=float, name=(tag_candidates[0] if tag_candidates else ""))
-    units = facts[tag].get("units", {})
-    unit = unit_preference if unit_preference in units else (
-        "USD" if "USD" in units else next(iter(units), None)
-    )
-    if unit is None:
-        return pd.Series(dtype=float, name=tag)
-    rows = []
-    for x in units[unit]:
-        if x.get("form") != "10-K" or x.get("fp") != "FY" or not x.get("end"):
-            continue
-        if "start" in x:  # duration facts: keep ~annual periods only
-            days = (pd.to_datetime(x["end"]) - pd.to_datetime(x["start"])).days
-            if not 300 <= days <= 400:
-                continue
-        rows.append({"date": pd.to_datetime(x["end"]), "value": float(x["val"]),
-                     "filed": x.get("filed", ""), "fy": x.get("fy")})
-    if not rows:
-        return pd.Series(dtype=float, name=tag)
-    df = pd.DataFrame(rows).sort_values(["date", "filed"]).drop_duplicates("date", keep="last")
-    s = df.set_index("date")["value"].sort_index()
-    s.name = tag
-    return s
+def sec_fact_series_multi(companyfacts, tag_candidates):
+    """Combine ALL candidate tags. Earlier tags take priority; later tags fill gaps."""
+    combined = pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+    for tag in tag_candidates:
+        s = sec_fact_series(companyfacts, [tag])
+        if not s.empty:
+            combined = combined.combine_first(s)
+    return combined.sort_index()
 
+
+def clean_sec(df, core=("Revenue", "Net income")):
+    """Drop empty years/columns. Never fabricate values."""
+    df = df.copy()
+    df.index = pd.to_datetime(df.index)
+    df = df.dropna(how="all")                                   # fully empty years (e.g. 2006)
+    core = [c for c in core if c in df.columns]
+    if core:
+        df = df.dropna(subset=core, how="any")                  # keep years with core data
+    df = df.dropna(axis=1, how="all")                           # metrics with no data at all
+    return df
 
 def get_sec_financials():
     cf = sec_companyfacts(SEC_CIK)
     definitions = {
-        "Revenue": ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"],
+        "Revenue": ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
+                    "SalesRevenueNet", "SalesRevenueGoodsNet"],
         "Operating income": ["OperatingIncomeLoss"],
-        "Net income": ["NetIncomeLoss"],
-        "Operating cash flow": ["NetCashProvidedByUsedInOperatingActivities"],
-        "Capital expenditures": ["PaymentsToAcquirePropertyPlantAndEquipment"],
-        "D&A": ["DepreciationDepletionAndAmortizationPropertyPlantAndEquipment", "DepreciationDepletionAndAmortization"],
-        "R&D expense": ["ResearchAndDevelopmentExpense"],
+        "Net income": ["NetIncomeLoss", "ProfitLoss"],
+        "Operating cash flow": ["NetCashProvidedByUsedInOperatingActivities",
+                                "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"],
+        "Capital expenditures": ["PaymentsToAcquirePropertyPlantAndEquipment",
+                                 "PaymentsToAcquireProductiveAssets"],
+        "D&A": ["DepreciationDepletionAndAmortization", "DepreciationAndAmortization",
+                "DepreciationDepletionAndAmortizationPropertyPlantAndEquipment"],
+        "R&D expense": ["ResearchAndDevelopmentExpense",
+                        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"],
         "Total assets": ["Assets"],
-        # Noncurrent debt first (the old order picked the current portion only)
-        "Long-term debt": ["LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtCurrent"],
+        "Long-term debt": ["LongTermDebtNoncurrent", "LongTermDebt"],
         "Cash": ["CashAndCashEquivalentsAtCarryingValue"],
+        # helper rows used only to derive EBIT; dropped below
+        "Pretax income": ["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+                          "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"],
+        "Interest expense": ["InterestExpense", "InterestExpenseDebt", "InterestExpenseNonoperating"],
     }
-    out = {label: sec_fact_series(cf, tags) for label, tags in definitions.items()}
-    return pd.concat(out, axis=1).sort_index()
+    out = {label: sec_fact_series_multi(cf, tags) for label, tags in definitions.items()}
+    df = pd.concat(out, axis=1).sort_index()
+
+    # Merck doesn't report operating income, so use an EBIT proxy where it is missing.
+    ebit_proxy = df["Pretax income"] + df["Interest expense"].fillna(0)
+    df["Operating income"] = df["Operating income"].fillna(ebit_proxy)
+    df = df.drop(columns=["Pretax income", "Interest expense"])
+
+    return clean_sec(df)
 
 
 def fmt_bn(x):
@@ -260,6 +266,18 @@ def fmt_bn(x):
 def safe_latest(series, default=np.nan):
     s = pd.to_numeric(series, errors="coerce").dropna()
     return float(s.iloc[-1]) if len(s) else default
+
+
+def show_df(df, fmt="{:,.2f}"):
+    """Display a dataframe with missing values shown as an em dash."""
+    if df is None or df.empty:
+        st.info("No data available.")
+        return
+    st.dataframe(df.style.format(fmt, na_rep="—"), use_container_width=True)
+
+
+def annualize_beta(stock, benchmark="^GSPC"):
+    ...
 
 
 def annualize_beta(stock, benchmark="^GSPC"):
