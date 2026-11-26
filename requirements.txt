@@ -5,5 +5,5 @@ numpy
 plotly
 requests
 scikit-learn
-matplotlib
+statsmodels
 jinja2
