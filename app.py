@@ -1043,6 +1043,49 @@ with tabs[6]:
     st.code("pip install -U streamlit yfinance pandas numpy plotly requests scikit-learn\nstreamlit run app.py",
             language="bash")
 
+
+# ----------------------------- Methodology -----------------------------
+with tabs[6]:
+    st.subheader("Methodology, assumptions & limitations")
+    st.markdown("""
+**Data hierarchy**
+1. SEC EDGAR 10-K/10-Q filings for reported financial statements (all candidate XBRL tags are combined; earlier tags take priority and later tags fill gaps).
+2. Merck annual reports and earnings releases for product-level sales and management guidance.
+3. Yahoo Finance for market prices, dividends, market capitalization, and peer snapshots (with fallbacks: fast_info, balance sheet, dividend history, regression beta).
+4. FRED for Treasury yields, rates, and macroeconomic series.
+
+**Core formulas**
+- Daily return: `P(t) / P(t-1) - 1`
+- Dividend yield: `trailing-12-month dividends / latest price`
+- CAPM cost of equity: `Risk-free rate + beta × equity risk premium`
+- WACC: `E/(D+E) × cost of equity + D/(D+E) × cost of debt × (1-tax rate)`
+- FCFF: `EBIT × (1-tax) + D&A - CapEx - change in NWC`
+- Terminal value: `FCFF(n+1) / (WACC - terminal growth)`
+- Equity value: `Enterprise value - debt + cash`
+- EBIT proxy (when operating income is not reported): `Pre-tax income + interest expense`
+
+**Machine-learning forecast**
+- Target: next quarter's revenue, modelled as growth versus the same quarter one year earlier. Features are scale-free: QoQ and YoY growth, R&D / revenue, net margin and next-quarter seasonality dummies. Simple seasonal baselines are reported alongside the ML models.
+- Quarterly figures come from SEC filings; Q4 is the full-year figure minus the nine-month year-to-date figure.
+- Chronological split: the latest 20% of quarters (at least four) are held out. The log-growth target is standardized for Elastic Net and the neural network.
+
+**Data handling**
+- Missing values are never filled with zeros, forward-fills or interpolation in the financial tables. Gaps display as "—". (The ML pipeline imputes missing feature values with the training median.)
+- Revenue and EBIT margin in the DCF come from the same fiscal year.
+
+**Important limitations**
+- Patent expiration and biosimilar launch dates are legal and commercial uncertainties; verify the specific patents, geographies, and litigation status from primary sources.
+- The patent-cliff model is a simplified revenue bridge, not a pharmaceutical product-level forecast.
+- The DCF is a teaching model. It should be improved with explicit product/segment forecasts, margin drivers, tax assumptions, and a consistent balance-sheet bridge.
+- The ML comparison uses a small sample and a short test window; treat it as exploratory, not predictive evidence.
+- Yahoo Finance data are not guaranteed to be complete or stable. SEC XBRL tags may require manual reconciliation to reported statements.
+- Historical stock returns are not forecasts of future returns.
+- Do not treat the output as a buy/sell recommendation.
+""")
+    st.markdown("**Suggested sources:** SEC EDGAR company filings (CIK 0000310158), Merck investor relations, Yahoo Finance, and FRED.")
+    st.code("pip install -U streamlit yfinance pandas numpy plotly requests scikit-learn\nstreamlit run app.py",
+            language="bash")
+
 # ----------------------------- ML Forecast -----------------------------
 with tabs[7]:
     st.subheader("Machine-learning revenue forecast (exploratory)")
@@ -1059,20 +1102,25 @@ with tabs[7]:
         except Exception as e:
             st.error(f"ML forecast failed: {e}")
         else:
-            st.markdown("#### Hold-out accuracy (lower RMSE/MAE is better)")
+            st.markdown("#### Hold-out accuracy (lower is better; baselines are the benchmark to beat)")
             st.dataframe(metrics_df.style.format(
-                {"RMSE ($bn)": "{:.2f}", "MAE ($bn)": "{:.2f}", "R-squared": "{:.2f}"}, na_rep="—"),
+                {"RMSE ($bn)": "{:.2f}", "MAE ($bn)": "{:.2f}", "MAPE (%)": "{:.1f}", "R-squared": "{:.2f}"}, na_rep="—"),
                 hide_index=True)
 
             actual_df = (predictions_df.drop_duplicates("Target quarter end")
                          [["Target quarter end", "Actual revenue ($bn)"]]
                          .rename(columns={"Actual revenue ($bn)": "Revenue ($bn)"}))
             actual_df["Model"] = "Actual"
-            pred_df = predictions_df.rename(columns={"Predicted revenue ($bn)": "Revenue ($bn)"})[
+            shown_models = ["Elastic Net", "Random Forest", "Neural Network", "Seasonal naive + YoY trend"]
+            pred_df = predictions_df[predictions_df["Model"].isin(shown_models)].rename(
+                columns={"Predicted revenue ($bn)": "Revenue ($bn)"})[
                 ["Target quarter end", "Model", "Revenue ($bn)"]]
             chart_df = pd.concat([actual_df[["Target quarter end", "Model", "Revenue ($bn)"]], pred_df])
             st.plotly_chart(px.line(chart_df, x="Target quarter end", y="Revenue ($bn)", color="Model",
                                     markers=True, title="Hold-out quarters: actual vs predicted revenue"))
+
+            with st.expander("Check the quarterly revenue data used (compare with Merck's 10-K/10-Q)"):
+                st.dataframe((sec_q_df[["Revenue"]].dropna() / 1e9).tail(16).style.format("${:,.2f}B"))
 
             st.markdown("#### Next-quarter revenue forecast")
             st.dataframe(next_quarter_df.style.format({"Next-quarter revenue forecast ($bn)": "${:,.2f}B"}),
