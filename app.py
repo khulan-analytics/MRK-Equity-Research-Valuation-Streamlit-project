@@ -8,20 +8,18 @@ import requests
 import streamlit as st
 import yfinance as yf
 from sklearn.compose import TransformedTargetRegressor
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import ElasticNet
 from sklearn.metrics import r2_score
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-try:  # optional: adds a Holt-Winters (ETS) time-series model to the ML comparison
+try:  # Holt-Winters (ETS) time-series model
     from statsmodels.tsa.holtwinters import ExponentialSmoothing
 except ImportError:
     ExponentialSmoothing = None
 
-try:  # optional: ARIMA / SARIMA models
+try:  # SARIMA model
     from statsmodels.tsa.statespace.sarimax import SARIMAX
 except ImportError:
     SARIMAX = None
@@ -42,7 +40,7 @@ PEERS = ["PFE", "ABBV", "BMY"]
 PEER_NAMES = {"MRK": "Merck & Co.", "PFE": "Pfizer", "ABBV": "AbbVie", "BMY": "Bristol-Myers Squibb"}
 TICKER = "MRK"
 PRICE_YEARS = 10  # price-history window; all price labels below use this value
-TRAIN_WINDOW = 32  # quarters (~8 years) used to fit each ML model; older data reflects a different Merck
+TRAIN_WINDOW = 32  # quarters (~8 years) used to fit each model; older data reflects a different Merck
 
 st.title("Merck & Co. (MRK) | Equity Research & Valuation")
 st.caption("Educational research tool. Not investment advice. Market and filing data may be delayed or revised.")
@@ -497,7 +495,7 @@ def get_sec_quarterly_financials():
     return df.dropna(how="all")
 
 
-# ----------------------------- ML revenue forecast -----------------------------
+# ----------------------------- Revenue forecast (Holt-Winters, Seasonal YoY, SARIMA, Neural Network) -----------------------------
 def build_ml_dataset(qdf):
     """
     Scale-free features known at quarter t. The target is next quarter's revenue, modelled as
@@ -543,9 +541,18 @@ def build_ml_dataset(qdf):
     return X, y, aux_t, latest_features, latest_aux
 
 
-def _scaled_target(pipe):
-    """Standardize the (log-growth) target so the Elastic Net penalty and the MLP behave."""
-    return TransformedTargetRegressor(regressor=pipe, transformer=StandardScaler())
+def _make_nn():
+    """Small neural net; the log-growth target is standardized so the MLP behaves."""
+    return TransformedTargetRegressor(
+        regressor=Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("model", MLPRegressor(hidden_layer_sizes=(4,), activation="relu", alpha=1.0,
+                                   learning_rate_init=0.005, max_iter=5000,
+                                   early_stopping=False, random_state=42)),
+        ]),
+        transformer=StandardScaler(),
+    )
 
 
 def _score(name, kind, actual, predicted):
@@ -562,7 +569,7 @@ def _score(name, kind, actual, predicted):
     }
 
 
-def _ets_forecast(history, steps=1):
+def _holt_forecast(history):
     """Holt-Winters (damped trend, multiplicative seasonality) one-step forecast; NaN if unavailable."""
     if ExponentialSmoothing is None or len(history) < 12:
         return np.nan
@@ -572,13 +579,13 @@ def _ets_forecast(history, steps=1):
             fit = ExponentialSmoothing(np.asarray(history, dtype=float), trend="add", damped_trend=True,
                                        seasonal="mul", seasonal_periods=4,
                                        initialization_method="estimated").fit()
-            return float(np.asarray(fit.forecast(steps))[-1])
+            return float(np.asarray(fit.forecast(1))[-1])
     except Exception:
         return np.nan
 
 
-def _arima_forecast(history, order, seasonal_order=(0, 0, 0, 0)):
-    """One-step (S)ARIMA forecast fitted on log revenue; NaN if statsmodels is missing or the fit fails."""
+def _sarima_forecast(history, order=(0, 1, 1), seasonal_order=(0, 1, 1, 4)):
+    """One-step SARIMA forecast fitted on log revenue; NaN if statsmodels is missing or the fit fails."""
     if SARIMAX is None or len(history) < 16:
         return np.nan
     try:
@@ -610,51 +617,21 @@ def run_ml_forecast(quarterly_df):
         raise ValueError("Not enough training observations after the chronological split.")
 
     y_test, aux_test = y.iloc[split:], aux.iloc[split:]
-
-    def make_models():
-        return {
-            "Elastic Net": _scaled_target(Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("model", ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=10000)),
-            ])),
-            "Random Forest": Pipeline([  # trees do not need scaling
-                ("imputer", SimpleImputer(strategy="median")),
-                ("model", RandomForestRegressor(n_estimators=300, max_depth=3,
-                                                min_samples_leaf=2, random_state=42)),
-            ]),
-            "Neural Network": _scaled_target(Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("model", MLPRegressor(hidden_layer_sizes=(4,), activation="relu", alpha=1.0,
-                                       learning_rate_init=0.005, max_iter=5000,
-                                       early_stopping=False, random_state=42)),
-            ])),
-        }
-
-    def baseline_forecasts(a):
-        return {
-            "Naive (last quarter)": a["last"].values,
-            "Seasonal naive (same quarter last year)": a["base"].values,
-            "Seasonal naive + YoY trend": (a["base"] * (1 + a["yoy"])).values,
-        }
-
     g_all = np.log(y / aux["base"])                       # target: log growth vs same quarter last year
     revenue_history = np.r_[aux["last"].values, latest_aux["last"].values]  # revenue at each feature quarter
 
-    # Walk-forward: for every held-out quarter, refit on the most recent TRAIN_WINDOW quarters known at that time.
     ts_funcs = {
-        "Holt-Winters ETS": lambda h: _ets_forecast(h),
-        "ARIMA(1,1,1)": lambda h: _arima_forecast(h, (1, 1, 1)),
-        "SARIMA(0,1,1)(0,1,1,4)": lambda h: _arima_forecast(h, (0, 1, 1), (0, 1, 1, 4)),
+        "Holt-Winters (Holt)": _holt_forecast,
+        "SARIMA(0,1,1)(0,1,1,4)": _sarima_forecast,
     }
-    ml_preds = {name: [] for name in make_models()}
+
+    # Walk-forward: for every held-out quarter, refit on the most recent TRAIN_WINDOW quarters known then.
+    nn_preds = []
     ts_preds = {name: [] for name in ts_funcs}
     for i in range(split, len(X)):
         lo = max(0, i - TRAIN_WINDOW)
-        for name, model in make_models().items():
-            model.fit(X.iloc[lo:i], g_all.iloc[lo:i])
-            ml_preds[name].append(float(aux["base"].iloc[i]) * float(np.exp(model.predict(X.iloc[[i]])[0])))
+        nn = _make_nn().fit(X.iloc[lo:i], g_all.iloc[lo:i])
+        nn_preds.append(float(aux["base"].iloc[i]) * float(np.exp(nn.predict(X.iloc[[i]])[0])))
         history = revenue_history[max(0, i + 1 - TRAIN_WINDOW - 4): i + 1]
         for name, fn in ts_funcs.items():
             ts_preds[name].append(fn(history))
@@ -671,28 +648,24 @@ def run_ml_forecast(quarterly_df):
                 "Predicted revenue ($bn)": float(estimate) / 1e9,
             })
 
-    for name, predicted in ml_preds.items():
-        log_predictions(name, "ML", predicted)
+    # Seasonal YoY: same quarter last year x (1 + latest YoY growth)
+    log_predictions("Seasonal YoY", "Baseline", (aux_test["base"] * (1 + aux_test["yoy"])).values)
+    log_predictions("Neural Network", "ML", nn_preds)
     for name, predicted in ts_preds.items():
         if not np.isnan(predicted).any():       # skip a model that is unavailable or failed to fit
             log_predictions(name, "Time series", predicted)
-    for name, predicted in baseline_forecasts(aux_test).items():
-        log_predictions(name, "Baseline", predicted)
 
     # Next quarter: refit on the most recent TRAIN_WINDOW labeled quarters.
     base_now = float(latest_aux["base"].iloc[0])
-    next_quarter = {}
-    for name, model in make_models().items():
-        model.fit(X.iloc[-TRAIN_WINDOW:], g_all.iloc[-TRAIN_WINDOW:])
-        next_quarter[name] = base_now * float(np.exp(model.predict(latest_features)[0])) / 1e9
+    next_quarter = {"Seasonal YoY": base_now * (1 + float(latest_aux["yoy"].iloc[0])) / 1e9}
+    nn = _make_nn().fit(X.iloc[-TRAIN_WINDOW:], g_all.iloc[-TRAIN_WINDOW:])
+    next_quarter["Neural Network"] = base_now * float(np.exp(nn.predict(latest_features)[0])) / 1e9
     for name, fn in ts_funcs.items():
         value = fn(revenue_history[-(TRAIN_WINDOW + 4):])
         if not np.isnan(value):
             next_quarter[name] = value / 1e9
-    for name, predicted in baseline_forecasts(latest_aux).items():
-        next_quarter[name] = float(predicted[0]) / 1e9
 
-    metrics_df = pd.DataFrame(metric_rows).sort_values("RMSE ($bn)")
+    metrics_df = pd.DataFrame(metric_rows).sort_values("RMSE ($bn)").reset_index(drop=True)
     predictions_df = pd.DataFrame(prediction_rows)
     next_quarter_df = pd.DataFrame({
         "Model": list(next_quarter.keys()),
@@ -727,7 +700,7 @@ def build_patent_scenarios(latest_total_revenue, latest_keytruda, years, non_key
 
 # ----------------------------- Data loading (each source isolated) -----------------------------
 tabs = st.tabs(["Overview", "Market data", "Financial statements", "Patent cliff",
-                "DCF valuation", "Peer comparison", "Methodology", "ML Forecast"])
+                "DCF valuation", "Peer comparison", "Methodology", "Revenue Forecast"])
 
 load_errors = []
 
@@ -752,7 +725,7 @@ with st.spinner("Loading MRK market and filing data..."):
         sec_q_df = get_sec_quarterly_financials()
     except Exception as e:
         sec_q_df = pd.DataFrame()
-        load_errors.append(f"SEC quarterly financials for ML: {e}")
+        load_errors.append(f"SEC quarterly financials for forecast: {e}")
 
 if load_errors:
     st.error("Some live data could not be loaded:\n\n" + "\n".join(f"- {m}" for m in load_errors))
@@ -1108,21 +1081,22 @@ with tabs[6]:
 - Equity value: `Enterprise value - debt + cash`
 - EBIT proxy (when operating income is not reported): `Pre-tax income + interest expense`
 
-**Machine-learning forecast**
-- Target: next quarter's revenue, modelled as growth versus the same quarter one year earlier. Features are scale-free: QoQ and YoY growth, R&D / revenue, net margin and next-quarter seasonality dummies. Simple seasonal baselines are reported alongside the ML models.
-- Quarterly figures come from SEC filings; Q4 is the full-year figure minus the nine-month year-to-date figure.
-- Each held-out quarter is forecast walk-forward: the models are refit on the most recent 32 quarters known at that time. Holt-Winters (ETS), ARIMA(1,1,1) and SARIMA(0,1,1)(0,1,1,4) time-series models (fitted on log revenue) are included when `statsmodels` is installed.
-- Evaluation: the latest 20% of quarters (at least four) are held out. The log-growth target is standardized for Elastic Net and the neural network.
+**Revenue forecast models**
+- Target: next quarter's revenue. Quarterly figures come from SEC filings; Q4 is the full-year figure minus the nine-month year-to-date figure.
+- Seasonal YoY (baseline): same quarter last year × (1 + latest YoY growth).
+- Neural network: small MLP predicting log growth versus the same quarter last year, using scale-free features (QoQ and YoY growth, R&D / revenue, net margin, next-quarter seasonality dummies). The log-growth target is standardized.
+- Holt-Winters (damped trend, multiplicative seasonality) and SARIMA(0,1,1)(0,1,1,4) are time-series models; SARIMA is fitted on log revenue. Both require `statsmodels`.
+- Each held-out quarter is forecast walk-forward: models are refit on the most recent 32 quarters known at that time. The latest 20% of quarters (at least four) are held out.
 
 **Data handling**
-- Missing values are never filled with zeros, forward-fills or interpolation in the financial tables. Gaps display as "—". (The ML pipeline imputes missing feature values with the training median.)
+- Missing values are never filled with zeros, forward-fills or interpolation in the financial tables. Gaps display as "—". (The neural network imputes missing feature values with the training median.)
 - Revenue and EBIT margin in the DCF come from the same fiscal year.
 
 **Important limitations**
 - Patent expiration and biosimilar launch dates are legal and commercial uncertainties; verify the specific patents, geographies, and litigation status from primary sources.
 - The patent-cliff model is a simplified revenue bridge, not a pharmaceutical product-level forecast.
 - The DCF is a teaching model. It should be improved with explicit product/segment forecasts, margin drivers, tax assumptions, and a consistent balance-sheet bridge.
-- The ML comparison uses a small sample and a short test window; treat it as exploratory, not predictive evidence.
+- The forecast comparison uses a small sample and a short test window; treat it as exploratory, not predictive evidence.
 - Yahoo Finance data are not guaranteed to be complete or stable. SEC XBRL tags may require manual reconciliation to reported statements.
 - Historical stock returns are not forecasts of future returns.
 - Do not treat the output as a buy/sell recommendation.
@@ -1131,23 +1105,24 @@ with tabs[6]:
     st.code("pip install -U streamlit yfinance pandas numpy plotly requests scikit-learn statsmodels\nstreamlit run app.py",
             language="bash")
 
-# ----------------------------- ML Forecast -----------------------------
+# ----------------------------- Revenue Forecast -----------------------------
 with tabs[7]:
-    st.subheader("Machine-learning revenue forecast (exploratory)")
-    st.markdown("Compares Elastic Net, Random Forest and a small neural network at predicting **next quarter's revenue** "
-                "from SEC quarterly filings, using a chronological hold-out of the most recent quarters.")
+    st.subheader("Revenue forecast: Holt-Winters, Seasonal YoY, SARIMA and Neural Network (exploratory)")
+    st.markdown("Compares Holt-Winters (Holt), a seasonal YoY baseline, SARIMA and a small neural network at "
+                "predicting **next quarter's revenue** from SEC quarterly filings, using a walk-forward "
+                "hold-out of the most recent quarters.")
     if sec_q_df.empty:
-        st.warning("SEC quarterly data could not be loaded, so the ML comparison is unavailable.")
+        st.warning("SEC quarterly data could not be loaded, so the forecast comparison is unavailable.")
     else:
         try:
-            with st.spinner("Training models..."):
+            with st.spinner("Fitting models..."):
                 metrics_df, predictions_df, next_quarter_df = run_ml_forecast(sec_q_df)
         except ValueError as e:
             st.warning(str(e))
         except Exception as e:
-            st.error(f"ML forecast failed: {e}")
+            st.error(f"Forecast failed: {e}")
         else:
-            st.markdown("#### Hold-out accuracy (lower is better; baselines are the benchmark to beat)")
+            st.markdown("#### Hold-out accuracy (lower is better; Seasonal YoY is the benchmark to beat)")
             st.dataframe(metrics_df.style.format(
                 {"RMSE ($bn)": "{:.2f}", "MAE ($bn)": "{:.2f}", "MAPE (%)": "{:.1f}", "R-squared": "{:.2f}"}, na_rep="—"),
                 hide_index=True)
@@ -1157,14 +1132,15 @@ with tabs[7]:
                          .rename(columns={"Actual revenue ($bn)": "Revenue ($bn)"}))
             actual_df["Model"] = "Actual"
             model_options = metrics_df["Model"].tolist()
-            shown_models = st.multiselect("Models to plot (default: the three lowest RMSE)",
-                                          model_options, default=model_options[:3])
+            shown_models = st.multiselect("Models to plot", model_options, default=model_options)
             pred_df = predictions_df[predictions_df["Model"].isin(shown_models)].rename(
                 columns={"Predicted revenue ($bn)": "Revenue ($bn)"})[
                 ["Target quarter end", "Model", "Revenue ($bn)"]]
-            chart_df = pd.concat([actual_df[["Target quarter end", "Model", "Revenue ($bn)"]], pred_df])
+            chart_df = pd.concat([actual_df[["Target quarter end", "Model", "Revenue ($bn)"]], pred_df],
+                                 ignore_index=True)
             st.plotly_chart(px.line(chart_df, x="Target quarter end", y="Revenue ($bn)", color="Model",
-                                    markers=True, title="Hold-out quarters: actual vs predicted revenue"))
+                                    markers=True, title="Hold-out quarters: actual vs predicted revenue"),
+                            key="ml_forecast_chart")
 
             with st.expander("Check the quarterly revenue data used (compare with Merck's 10-K/10-Q)"):
                 st.dataframe((sec_q_df[["Revenue"]].dropna() / 1e9).tail(16).style.format("${:,.2f}B"))
@@ -1173,9 +1149,9 @@ with tabs[7]:
             st.dataframe(next_quarter_df.style.format({"Next-quarter revenue forecast ($bn)": "${:,.2f}B"}),
                          hide_index=True)
             st.download_button("Download hold-out predictions CSV",
-                               predictions_df.to_csv(index=False).encode(), "mrk_ml_predictions.csv", "text/csv")
-            st.caption("Small sample, short test window, no hyperparameter tuning. Tree models cannot extrapolate beyond "
-                       "the range of revenue seen in training. Not investment advice.")
+                               predictions_df.to_csv(index=False).encode(), "mrk_forecast_predictions.csv", "text/csv")
+            st.caption("Small sample, short test window, no hyperparameter tuning. The neural network is trained on "
+                       "log YoY growth and is noisy with few quarters. Not investment advice.")
 
 st.markdown("---")
 st.caption(f"Built for educational use · Valuation date selected: {as_of.isoformat()} · Data retrieval is subject to provider availability and API terms.")
