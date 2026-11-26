@@ -4,18 +4,39 @@
 
 ### *What happens to Merck's value when Keytruda loses patent protection?*
 
-An interactive equity research tool that turns **live market data, SEC filings, and macro indicators** into a scenario-driven DCF valuation of Merck & Co. (NYSE: MRK).
+An interactive equity research tool that turns **live market data, SEC filings, and macro indicators** into a scenario-driven DCF valuation of Merck & Co. (NYSE: MRK), plus a benchmarked machine-learning revenue forecast.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
-[![Pandas](https://img.shields.io/badge/pandas-Data-150458?logo=pandas&logoColor=white)](https://pandas.pydata.org/)
+[![pandas](https://img.shields.io/badge/pandas-Data-150458?logo=pandas&logoColor=white)](https://pandas.pydata.org/)
 [![Plotly](https://img.shields.io/badge/Plotly-Charts-3F4F75?logo=plotly&logoColor=white)](https://plotly.com/python/)
+[![scikit-learn](https://img.shields.io/badge/scikit--learn-ML-F7931E?logo=scikitlearn&logoColor=white)](https://scikit-learn.org/)
+[![statsmodels](https://img.shields.io/badge/statsmodels-Time%20Series-4B8BBE)](https://www.statsmodels.org/)
 [![SEC EDGAR](https://img.shields.io/badge/Data-SEC%20EDGAR-0A3D62)](https://www.sec.gov/edgar)
 [![Status](https://img.shields.io/badge/Status-Educational-success)](#%EF%B8%8F-limitations--honest-caveats)
 
-**[🚀 [Live Demo](https://mrk-equity-research-valuation.streamlit.app/)](#)** · **[📸 Screenshots](#-screenshots)** · **[🧠 Methodology](#-methodology)** · **[⚡ Quick Start](#-quick-start)**
+### [🚀 **Live Demo**](https://mrk-equity-research-valuation.streamlit.app/)
+
+[📸 Screenshots](#-screenshots) · [🧠 Methodology](#-methodology) · [🤖 ML Forecast](#-ml-revenue-forecast) · [🛠️ Engineering](#%EF%B8%8F-engineering-decisions) · [⚡ Quick Start](#-quick-start)
 
 </div>
+
+---
+
+## 📑 Table of Contents
+
+- [The Problem](#-the-problem)
+- [Highlights](#-highlights)
+- [Screenshots](#-screenshots)
+- [Architecture](#%EF%B8%8F-architecture)
+- [Methodology](#-methodology)
+- [ML Revenue Forecast](#-ml-revenue-forecast)
+- [Engineering Decisions](#%EF%B8%8F-engineering-decisions)
+- [Quick Start](#-quick-start)
+- [Tech Stack](#-tech-stack)
+- [Limitations & Honest Caveats](#%EF%B8%8F-limitations--honest-caveats)
+- [Roadmap](#%EF%B8%8F-roadmap)
+- [What I Learned](#-what-i-learned)
 
 ---
 
@@ -23,7 +44,8 @@ An interactive equity research tool that turns **live market data, SEC filings, 
 
 Merck's largest product, **Keytruda**, accounts for a large share of company revenue, and its patent protection is expected to start expiring late this decade. Analysts disagree on how much value that "patent cliff" destroys, and most public models hide their assumptions in a spreadsheet.
 
-**This project makes the assumptions visible and adjustable.** Move a slider for the erosion rate, the cliff year, or the cost of capital, and the revenue forecast, free cash flow, and implied share price all update instantly.
+> **This project makes the assumptions visible and adjustable.**
+> Move a slider for the erosion rate, the cliff year, or the cost of capital, and the revenue forecast, free cash flow, and implied share price all update instantly.
 
 ---
 
@@ -33,13 +55,15 @@ Merck's largest product, **Keytruda**, accounts for a large share of company rev
 |---|---|---|
 | 🧪 | **Patent-cliff scenario engine** | Splits Keytruda from the rest of the business and models Bull / Base / Bear erosion paths |
 | 💰 | **Linked DCF valuation** | FCFF model driven by the selected scenario; WACC built from CAPM and live capital-structure inputs |
-| 🏛️ | **SEC EDGAR pipeline** | Pulls 10-K facts from the XBRL API, merges multiple tags across years, derives an EBIT proxy where Merck reports none |
+| 🤖 | **Benchmarked ML forecast** | Elastic Net, Random Forest, neural network, Holt-Winters, ARIMA and SARIMA scored walk-forward against simple baselines |
+| 🏛️ | **SEC EDGAR pipeline** | Pulls annual and quarterly facts from the XBRL API, merges multiple tags across years, derives Q4 and an EBIT proxy where Merck reports none |
 | 📈 | **Market & risk analytics** | Volatility, drawdown, cumulative return, regression beta vs. the S&P 500 |
 | 🆚 | **Peer comparison** | MRK vs. PFE, ABBV, BMY on P/E, P/S, yield, beta, and market cap |
 | 🏦 | **Macro context** | Optional FRED integration (10Y Treasury, Fed Funds, CPI) |
-| 📥 | **Exportable** | Every table downloads as CSV |
+| 📥 | **Exportable** | Tables and forecasts download as CSV |
 
 ---
+
 ## 📸 Screenshots
 
 <table>
@@ -54,9 +78,13 @@ Merck's largest product, **Keytruda**, accounts for a large share of company rev
     </td>
   </tr>
   <tr>
-    <td align="center" colspan="2">
+    <td align="center" width="50%">
       <b>DCF Valuation</b><br>
-      <img src="dcf.png" alt="DCF Valuation" width="60%">
+      <img src="dcf.png" alt="DCF Valuation" width="100%">
+    </td>
+    <td align="center" width="50%">
+      <b>ML Revenue Forecast</b><br>
+      <img src="ml_forecast.png" alt="ML Revenue Forecast" width="100%">
     </td>
   </tr>
 </table>
@@ -72,14 +100,16 @@ flowchart LR
     C[FRED API<br/>rates · CPI] --> D
     D[Data layer<br/>fallbacks · cleaning · caching] --> E[Patent-cliff<br/>scenario model]
     D --> F[Market &<br/>risk analytics]
-    E --> G[FCFF DCF<br/>WACC · terminal value]
     D --> H[Peer<br/>comparison]
-    G --> I[Streamlit UI<br/>7 interactive tabs]
+    D --> J[ML forecast<br/>walk-forward + baselines]
+    E --> G[FCFF DCF<br/>WACC · terminal value]
+    G --> I[Streamlit UI<br/>8 interactive tabs]
     F --> I
     H --> I
+    J --> I
 ```
 
-**Tabs:** Overview · Market Data · Financial Statements · Patent Cliff · DCF Valuation · Peer Comparison · Methodology
+**Tabs:** Overview · Market Data · Financial Statements · Patent Cliff · DCF Valuation · Peer Comparison · Methodology · ML Forecast
 
 ---
 
@@ -114,6 +144,34 @@ Bull / Bear cases scale the base erosion rate by 0.6× and 1.5× (capped at 85%)
 
 ---
 
+## 🤖 ML Revenue Forecast
+
+The ML tab asks a narrower question than the DCF: **how accurately can next quarter's revenue be predicted from SEC filings alone?** It is built to be honest about the answer.
+
+<details>
+<summary><b>Click to expand the setup</b></summary>
+
+| Design choice | Why |
+|---|---|
+| **Target is growth, not level** | The models predict growth versus the same quarter last year, then convert back to revenue. Predicting a trending dollar amount made tree models flat and inflated errors. |
+| **Scale-free features** | QoQ and YoY growth, R&D / revenue, net margin, and seasonality dummies, instead of raw dollar amounts. |
+| **Walk-forward evaluation** | Each held-out quarter is forecast by models refit on the most recent 32 quarters known at that time. Nothing from the future leaks in. |
+| **Chronological hold-out** | The latest 20% of quarters (at least four) are scored. No random shuffling. |
+| **Baselines to beat** | Last quarter, same quarter last year, and same quarter last year × YoY trend. A model that cannot beat these adds nothing. |
+| **Models compared** | Elastic Net, Random Forest, neural network, Holt-Winters ETS, ARIMA(1,1,1), SARIMA(0,1,1)(0,1,1,4). |
+| **Metrics** | RMSE, MAE, MAPE, R². |
+
+Q4 revenue is derived as the full-year figure minus the nine-month year-to-date figure, and the app shows the quarterly series it used so it can be checked against Merck's filings.
+
+</details>
+
+<!--
+Add your own results here once you have run the app, for example:
+**Result:** [model name] had the lowest hold-out error (RMSE $X.XXB, MAPE X.X%) versus $X.XXB for the best baseline.
+-->
+
+---
+
 ## 🛠️ Engineering Decisions
 
 The part I'm proudest of isn't the valuation math. It's making a data app that **fails honestly** when its sources are flaky.
@@ -127,6 +185,9 @@ The part I'm proudest of isn't the valuation math. It's making a data app that *
 | Missing data tempts you to `fillna(0)` | **Never fabricated.** Gaps render as `—`; placeholders trigger a visible warning |
 | Yahoo changed the `dividendYield` units between versions | Computed from trailing-12-month dividends ÷ price instead |
 | One `try/except` around all sources lost everything on any failure | Each source loads independently, so SEC data survives a Yahoo outage |
+| ML models on raw dollar targets gave errors in the billions | Predict log growth vs. the same quarter last year, with scale-free features |
+| A forecasting model that fails to fit could show misleading numbers | A model that is unavailable or fails is **omitted**, never filled with a fallback |
+| Streamlit raised duplicate-widget errors for repeated inputs | The DCF tab reuses the sidebar assumptions instead of recreating the same widgets |
 
 ---
 
@@ -146,27 +207,34 @@ streamlit run app.py
 
 **`requirements.txt`**
 ```
-streamlit
+streamlit>=1.50
 yfinance>=0.2.40
 pandas
 numpy
 plotly
 requests
+scikit-learn
+statsmodels
+jinja2
 ```
 
 **Optional:** paste a free [FRED API key](https://fred.stlouisfed.org/docs/api/api_key.html) into the sidebar to enable macro charts.
 
-> **Tip:** if market data comes back empty, run `pip install -U yfinance` and click **Clear cached data / retry** in the sidebar.
+> **Tip:** if market data comes back empty, run `pip install -U yfinance` and click **Clear cached data / retry** in the sidebar. If the ARIMA, SARIMA or Holt-Winters rows are missing from the ML tab, check that `statsmodels` is installed.
 
 ---
 
 ## 🧰 Tech Stack
 
-- **Language:** Python
-- **App framework:** Streamlit
-- **Data & analysis:** pandas, NumPy
-- **Visualization:** Plotly
-- **Data sources:** Yahoo Finance (`yfinance`), SEC EDGAR XBRL API, FRED API
+| Layer | Tools |
+|---|---|
+| **Language** | Python |
+| **App framework** | Streamlit |
+| **Data & analysis** | pandas, NumPy |
+| **Machine learning** | scikit-learn (Elastic Net, Random Forest, MLP) |
+| **Time series** | statsmodels (Holt-Winters, ARIMA, SARIMA) |
+| **Visualization** | Plotly |
+| **Data sources** | Yahoo Finance (`yfinance`), SEC EDGAR XBRL API, FRED API |
 
 ---
 
@@ -178,6 +246,7 @@ Good analysts state what their model *can't* do.
 - **Constant margins.** EBIT margin is held flat even as high-margin Keytruda revenue falls, which likely overstates future profit.
 - **Terminal value sensitivity.** Gordon Growth assumes stable growth, so a forecast that ends mid-erosion will distort the result. The terminal value is typically the largest share of EV.
 - **Low-beta WACC.** Merck's regression beta is low, which can produce a WACC below what most analysts use. WACC is an editable input, so test higher values.
+- **ML forecast is exploratory.** About 50 quarters of filings is a small sample, and the models cannot see the patent cliff, guidance, or analyst consensus. They are built for next-quarter accuracy, not a multi-year forecast, and may not beat the simple baselines.
 - **Data caveats.** Yahoo data can be incomplete; SEC XBRL tags may need reconciliation against the filed 10-K. The default Keytruda revenue is an illustrative starting value to be replaced with the latest reported figure.
 
 > **Educational project. Not investment advice.**
@@ -191,6 +260,8 @@ Good analysts state what their model *can't* do.
 - [ ] Mid-year discounting convention
 - [ ] Margin erosion linked to Keytruda's revenue mix
 - [ ] Bottom-up beta from peer set (unlever / relever)
+- [ ] Analyst consensus revenue as an extra benchmark in the ML tab
+- [ ] Ensemble of the best forecasting models
 - [ ] Institutional holders table from 13F data
 - [ ] Unit tests for the valuation and SEC-parsing functions
 - [ ] Event annotations on price and volume charts
@@ -202,14 +273,14 @@ Good analysts state what their model *can't* do.
 - Building **resilient data pipelines** around unreliable public APIs
 - Translating **corporate finance theory** (CAPM, WACC, FCFF, terminal value) into working, testable code
 - Parsing the **SEC XBRL schema** and handling tag changes across fiscal years
+- Evaluating forecasts properly: **walk-forward testing, baselines, and knowing when a complex model doesn't help**
 - Designing a UI where **assumptions are first-class**, so users can interrogate the model instead of trusting it
 
 ---
 
 ## 👤 Author
 
-Khulan Ganzorig
-
+**Khulan Ganzorig**
 
 *If this project was useful or interesting, a ⭐ helps others find it.*
 
